@@ -1,4 +1,5 @@
-import { createRegulationCycle, calculateCycleSummary, calculateMultiDayStats, addMultiDayMeasurement } from './ui.js';
+import { createRegulationCycle, calculateCycleSummary } from './regulation.js';
+import { calculateMultiDayStats, addMultiDayMeasurement } from './multiday.js';
 
 export function saveFormData() {
     const formData = {
