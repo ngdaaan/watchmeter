@@ -1,5 +1,5 @@
 import { POSITIONS, getISOStringFromDate, formatTime } from './utils.js';
-import { calculateCycleStats, calculateStats } from './calculations.js';
+import { calculateCycleStats, calculateStats, calculateRegulationAggregates, calculateMultiDayPoint, calculateMultiDayRate } from './calculations.js';
 import { watchMic } from './audio.js';
 
 let cycleCount = 0;
@@ -110,30 +110,15 @@ export function calculateCycleSummary(cycleId) {
 
 export function calculateTotalRegulationAverage() {
     const cycles = document.querySelectorAll('.regulation-cycle');
-    let totalRate = 0;
-    let totalBeat = 0;
-    let rateCount = 0;
-    let beatCount = 0;
 
-    cycles.forEach(cycle => {
+    // Extract data from DOM
+    const cyclesData = Array.from(cycles).map(cycle => {
         const beatErrors = Array.from(cycle.querySelectorAll('.beat-error')).map(el => el.value === '' ? null : parseFloat(el.value)).filter(v => v !== null);
         const rates = Array.from(cycle.querySelectorAll('.rate-per-day')).map(el => el.value === '' ? null : parseFloat(el.value)).filter(v => v !== null);
-
-        if (beatErrors.length > 0) {
-            const avg = beatErrors.reduce((a, b) => a + b, 0) / beatErrors.length;
-            totalBeat += avg;
-            beatCount++;
-        }
-
-        if (rates.length > 0) {
-            const avg = rates.reduce((a, b) => a + b, 0) / rates.length;
-            totalRate += avg;
-            rateCount++;
-        }
+        return { beatErrors, rates };
     });
 
-    const globalAvgRate = rateCount > 0 ? (totalRate / rateCount).toFixed(1) : '0.0';
-    const globalAvgBeat = beatCount > 0 ? (totalBeat / beatCount).toFixed(2) : '0.00';
+    const { globalAvgRate, globalAvgBeat, rateCount } = calculateRegulationAggregates(cyclesData);
 
     let totalDiv = document.getElementById('regulationTotalAverage');
 
@@ -245,9 +230,10 @@ export function calculateMultiDayStats() {
             return;
         }
 
+        // Apply +200ms offset for human reaction time (matching previous logic)
         watchDate.setMilliseconds(watchDate.getMilliseconds() + 200);
 
-        const deviation = (watchDate - refDate) / 1000;
+        const deviation = calculateMultiDayPoint(refDate, watchDate);
         deviationSpan.textContent = deviation.toFixed(2);
 
         const currentData = { date: refDate, deviation: deviation };
@@ -256,15 +242,8 @@ export function calculateMultiDayStats() {
         lastData = currentData;
 
         if (previousData) {
-            const timeDiffDays = (currentData.date - previousData.date) / (1000 * 60 * 60 * 24);
-
-            if (timeDiffDays > 0) {
-                const deltaDeviation = currentData.deviation - previousData.deviation;
-                const rate = deltaDeviation / timeDiffDays;
-                rateSpan.textContent = rate.toFixed(2);
-            } else {
-                rateSpan.textContent = '0.00';
-            }
+            const rate = calculateMultiDayRate(previousData, currentData);
+            rateSpan.textContent = rate;
         } else {
             rateSpan.textContent = '0.00';
         }
@@ -279,15 +258,18 @@ export function calculateMultiDayStats() {
         if (resultBox) resultBox.style.display = 'block';
 
         if (firstData && lastData && firstData !== lastData) {
-            const totalTimeDiffDays = (lastData.date - firstData.date) / (1000 * 60 * 60 * 24);
+            debugger;
+            const avgRate = calculateMultiDayRate(firstData, lastData);
+            // Logic check: The original code did:
+            // totalDeltaDev = last - first
+            // totalTimeDiff = last.date - first.date
+            // avgRate = totalDeltaDev / totalTimeDiff
+            // This is exactly what calculateMultiDayRate does given first and last data points!
 
-            if (Math.abs(totalTimeDiffDays) > 0.001) {
-                const totalDeltaDev = lastData.deviation - firstData.deviation;
-                const avgRate = totalDeltaDev / totalTimeDiffDays;
-                totalAvgRateSpan.textContent = avgRate.toFixed(2) + ' s/d';
-
+            if (avgRate !== '0.00') { // Simplified check, or check days > 0
+                totalAvgRateSpan.textContent = avgRate + ' s/d';
                 const finalVarInput = document.getElementById('finalVariation');
-                if (finalVarInput) finalVarInput.value = avgRate.toFixed(1);
+                if (finalVarInput) finalVarInput.value = parseFloat(avgRate).toFixed(1);
             } else {
                 totalAvgRateSpan.textContent = '0.00 s/d';
             }
