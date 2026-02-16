@@ -158,20 +158,21 @@ export class WatchMicrophone {
         const avgInterval = validIntervals.reduce((a, b) => a + b, 0) / validIntervals.length;
         const bphObserved = (1 / avgInterval) * 3600;
 
-        const standards = [14400, 18000, 21600, 25200, 28800, 36000];
+        const standards = [14400, 18000, 19800, 21600, 25200, 28800, 36000];
         const targetBPH = standards.reduce((prev, curr) =>
             Math.abs(curr - bphObserved) < Math.abs(prev - bphObserved) ? curr : prev
         );
 
         // Check if close enough (within 1000 BPH is generous but handles drift)
         if (Math.abs(bphObserved - targetBPH) < 2000) {
+            console.log(`Locked BPH: ${targetBPH} (Observed: ${bphObserved.toFixed(1)})`);
             this.detectedBPH = targetBPH;
             this.refInterval = 3600 / targetBPH;
             this.state = 'MEASURING';
 
             // Tighten minInterval to reject echoes/ringing
-            // Set to 60% of expected interval
-            this.minInterval = this.refInterval * 0.6;
+            // Set to 85% of expected interval to avoid double triggering on echoes
+            this.minInterval = this.refInterval * 0.85;
         }
     }
 
@@ -186,7 +187,9 @@ export class WatchMicrophone {
         const expectedTime = count * this.refInterval;
         const actualTime = last - first;
 
-        const drift = actualTime - expectedTime;
+        // Positive drift means Actual < Expected (Device is FAST)
+        // Negative drift means Actual > Expected (Device is SLOW)
+        const drift = expectedTime - actualTime;
 
         // Rate s/d
         const rate = (drift / actualTime) * 86400;
