@@ -21,6 +21,10 @@ export class WatchMicrophone {
         this.totalSamples = 0;
         this.sampleRate = 0;
 
+        // Adaptive Thresholding State
+        this.runningPeak = 0.001;
+        this.adaptiveThreshold = 0.00075;
+
         // For visualization/debugging
         this.debugCallback = null;
     }
@@ -66,6 +70,8 @@ export class WatchMicrophone {
             this.state = 'DETECTING';
             this.detectedBPH = 0;
             this.minInterval = 0.08; // Conservative start
+            this.runningPeak = 0.001;
+
 
             this.processor.onaudioprocess = (e) => {
                 if (!this.isListening) return;
@@ -128,7 +134,18 @@ export class WatchMicrophone {
         }
         this.currentLevel = maxAmp;
 
-        if (maxAmp > this.threshold) {
+        // Adaptive Threshold Logic
+        // Update running peak with decay
+        if (maxAmp > this.runningPeak) {
+            this.runningPeak = maxAmp;
+        } else {
+            this.runningPeak *= 0.995; // Slow decay
+        }
+
+        // Set threshold to 50% of recent peak, but never below absolute min
+        this.adaptiveThreshold = Math.max(0.00075, this.runningPeak * 0.5);
+
+        if (maxAmp > this.adaptiveThreshold) {
             const exactSampleIndex = this.totalSamples + maxIndex;
             const tickTime = exactSampleIndex / this.sampleRate;
 
