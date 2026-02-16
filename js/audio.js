@@ -140,38 +140,61 @@ export class WatchMicrophone {
     }
 
     attemptBPHDetection() {
-        const intervals = [];
-        for (let i = 1; i < this.ticks.length; i++) {
-            intervals.push(this.ticks[i] - this.ticks[i - 1]);
-        }
-        if (intervals.length < 5) return;
+        if (this.ticks.length < 5) return;
 
-        // Sort and Median
-        const sorted = [...intervals].sort((a, b) => a - b);
-        const median = sorted[Math.floor(sorted.length / 2)];
-
-        // Filter Outliers (Noise)
-        const validIntervals = intervals.filter(i => Math.abs(i - median) < median * 0.2);
-
-        if (validIntervals.length < 5) return; // Wait for more clean data
-
-        const avgInterval = validIntervals.reduce((a, b) => a + b, 0) / validIntervals.length;
-        const bphObserved = (1 / avgInterval) * 3600;
-
+        // Consensus/Voting Algorithm to robustness against Jitter (Bimodal noise) and Missed Beats
         const standards = [14400, 18000, 19800, 21600, 25200, 28800, 36000];
-        const targetBPH = standards.reduce((prev, curr) =>
-            Math.abs(curr - bphObserved) < Math.abs(prev - bphObserved) ? curr : prev
-        );
+        const candidates = [];
 
-        // Check if close enough (within 1000 BPH is generous but handles drift)
-        if (Math.abs(bphObserved - targetBPH) < 2000) {
-            console.log(`Locked BPH: ${targetBPH} (Observed: ${bphObserved.toFixed(1)})`);
-            this.detectedBPH = targetBPH;
-            this.refInterval = 3600 / targetBPH;
+        const t0 = this.ticks[0];
+
+        for (const stdBPH of standards) {
+            const stdInterval = 3600 / stdBPH;
+            let totalSquaredError = 0;
+            let maxError = 0;
+
+            for (let i = 1; i < this.ticks.length; i++) {
+                const t = this.ticks[i] - t0;
+
+                // Find nearest expected grid point
+                const cycles = Math.round(t / stdInterval);
+                const expectedTime = cycles * stdInterval;
+                const diff = Math.abs(t - expectedTime);
+
+                totalSquaredError += diff * diff;
+                if (diff > maxError) maxError = diff;
+            }
+
+            const rmse = Math.sqrt(totalSquaredError / (this.ticks.length - 1));
+
+            // Penalize high maxError? 
+            // If we have distinct "clusters", RMSE handles it.
+
+            candidates.push({ bph: stdBPH, rmse: rmse, maxError: maxError });
+        }
+
+        // Sort by RMSE (Ascending)
+        candidates.sort((a, b) => a.rmse - b.rmse);
+
+        const best = candidates[0];
+
+        // Debug
+        // console.log("BPH Candidates:", candidates.slice(0, 3));
+
+        // Validation Threshold
+        // RMSE should be reasonably small. 
+        // For 28800 (0.125), random noise might give 0.04.
+        // Good lock should be < 0.02 or 0.03.
+        if (best.rmse < 0.04) {
+            console.log(`Locked BPH: ${best.bph} (RMSE: ${(best.rmse * 1000).toFixed(2)}ms)`);
+
+            this.detectedBPH = best.bph;
+            this.refInterval = 3600 / best.bph;
             this.state = 'MEASURING';
 
-            // Tighten minInterval to reject echoes/ringing
-            // Set to 85% of expected interval to avoid double triggering on echoes
+            // Tighten minInterval? 
+            // We know the signal is jittery, so maybe don't tighten too much?
+            // But we need to reject echoes.
             this.minInterval = this.refInterval * 0.85;
         }
     }
