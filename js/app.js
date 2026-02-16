@@ -1,16 +1,23 @@
 import {
-    addRegulationCycle,
-    removeRegulationCycle,
-    calculateCycleSummary,
-    addMultiDayMeasurement,
-    removeMultiDayRow,
-    calculateMultiDayStats,
     handleBeforePrint,
     handleAfterPrint,
     printForm,
-    resetForm,
-    startWatchListening
+    resetForm
 } from './ui.js';
+
+import {
+    addRegulationCycle,
+    removeRegulationCycle,
+    calculateCycleSummary,
+    startWatchListening
+} from './regulation.js';
+
+import {
+    addMultiDayMeasurement,
+    removeMultiDayRow,
+    calculateMultiDayStats
+} from './multiday.js';
+
 import { saveFormData, loadFormData } from './storage.js';
 
 // Expose functions to global scope for HTML event handlers
