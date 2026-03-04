@@ -158,8 +158,8 @@ export function startWatchListening(cycleId, positionIndex, btnElement) {
                 statusText = `Measuring... ${timeLeft}s (Vol: ${vol}%)`;
                 if (stats) {
                     statusText += ` | ${stats.bph} BPH`;
-                    rateInput.value = stats.rate;
-                    beatInput.value = stats.beatError;
+                    rateInput.value = stats.rate !== undefined ? stats.rate.toFixed(1) : '';
+                    beatInput.value = stats.beatErrorMs !== undefined ? stats.beatErrorMs.toFixed(1) : '';
                     calculateCycleSummary(cycleId);
                 }
             } else {
@@ -180,8 +180,8 @@ export function startWatchListening(cycleId, positionIndex, btnElement) {
                 statusDiv.textContent = `Done! ${result.bph} BPH`;
                 statusDiv.style.color = 'var(--color-success)';
 
-                beatInput.value = result.beatError;
-                rateInput.value = result.rate;
+                beatInput.value = result.beatErrorMs;
+                rateInput.value = result.rateSecondsPerDay;
 
                 calculateCycleSummary(cycleId);
             }

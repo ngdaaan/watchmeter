@@ -1,41 +1,57 @@
+// watch-microphone.js
+
 export class WatchMicrophone {
     constructor() {
+        // Web Audio state
         this.audioCtx = null;
         this.stream = null;
         this.source = null;
         this.gainNode = null;
         this.filter = null;
         this.processor = null;
+
+        // Tick detection state
         this.isListening = false;
-
-        this.ticks = []; // Array of timestamps (seconds, float)
-        this.lastTickTime = 0;
-        this.threshold = 0.00075;
-        this.minInterval = 0.08;
-
-        // New State Variables
-        this.state = 'IDLE'; // IDLE, DETECTING, MEASURING, FINISHED
-        this.detectedBPH = 0;
-        this.refInterval = 0; // Target interval for locked BPH
-        this.measureStartIndex = 0; // ticks[] index when MEASURING begins
-        this.startTime = 0;
-        this.totalSamples = 0;
         this.sampleRate = 0;
+        this.totalSamples = 0;
+        this.currentLevel = 0;
 
-        // Adaptive Thresholding State
+        this.ticks = [];          // tick timestamps in seconds (float)
+        this.lastTickTime = 0;    // last accepted tick time (s)
+
+        // Adaptive thresholding
         this.runningPeak = 0.001;
         this.adaptiveThreshold = 0.00075;
+        this.absMinThreshold = 0.00075;
 
-        // For visualization/debugging
-        this.debugCallback = null;
+        // Beat detection / measurement state
+        this.state = "IDLE";      // IDLE | DETECTING | MEASURING | FINISHED
+        this.detectedBPH = 0;
+        this.refInterval = 0;     // expected interval between detected beats (s)
+        this.minInterval = 0.08;  // minimum spacing between ticks (s)
+        this.measureStartIndex = 0;
+
+        // Timing window
+        this.startTimeMs = 0;
+        this.measureDurationSec = 30;
+
+        // UI callbacks
+        this.onProgress = null;
+        this.onResult = null;
+        this.onError = null;
     }
 
     async start(onProgress, onResult, onError) {
+        this.onProgress = onProgress;
+        this.onResult = onResult;
+        this.onError = onError;
+
         try {
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                throw new Error("Microphone access not supported. (Are you on HTTPS or localhost?)");
+                throw new Error("Microphone access not supported. Use HTTPS or localhost.");
             }
 
+            // Request mono, raw-ish audio
             this.stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: false,
@@ -47,13 +63,20 @@ export class WatchMicrophone {
             });
 
             this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            this.sampleRate = this.audioCtx.sampleRate;
+
             this.source = this.audioCtx.createMediaStreamSource(this.stream);
+
+            // Gain (boost low-level tick sounds)
             this.gainNode = this.audioCtx.createGain();
             this.gainNode.gain.value = 50.0;
+
+            // High-pass filter to remove handling / low-frequency noise
             this.filter = this.audioCtx.createBiquadFilter();
-            this.filter.type = 'highpass';
+            this.filter.type = "highpass";
             this.filter.frequency.value = 200;
 
+            // ScriptProcessorNode (deprecated but still widely supported; can be replaced with AudioWorkletNode)
             this.processor = this.audioCtx.createScriptProcessor(2048, 1, 1);
 
             this.source.connect(this.filter);
@@ -61,95 +84,128 @@ export class WatchMicrophone {
             this.gainNode.connect(this.processor);
             this.processor.connect(this.audioCtx.destination);
 
+            // Reset state
             this.isListening = true;
-            this.ticks = [];
+            this.state = "DETECTING";
             this.totalSamples = 0;
-            this.sampleRate = this.audioCtx.sampleRate;
-            this.startTime = Date.now();
-
-            // Initialize State
-            this.state = 'DETECTING';
-            this.detectedBPH = 0;
-            this.measureStartIndex = 0;
-            this.minInterval = 0.08; // Conservative start
+            this.ticks = [];
+            this.lastTickTime = 0;
             this.runningPeak = 0.001;
-
+            this.adaptiveThreshold = this.absMinThreshold;
+            this.detectedBPH = 0;
+            this.refInterval = 0;
+            this.measureStartIndex = 0;
+            this.startTimeMs = performance.now();
 
             this.processor.onaudioprocess = (e) => {
                 if (!this.isListening) return;
 
                 const inputData = e.inputBuffer.getChannelData(0);
-                this.processAudioBuffer(inputData);
+                this._processAudioBuffer(inputData);
 
                 this.totalSamples += inputData.length;
 
-                // Update Progress and State Logic
-                const duration = (Date.now() - this.startTime) / 1000;
+                const elapsedSec = (performance.now() - this.startTimeMs) / 1000;
+                const remainingSec = Math.max(0, this.measureDurationSec - elapsedSec);
 
-                // 1. Check for BPH Detection if in DETECTING mode
-                if (this.state === 'DETECTING') {
-                    // Attempt detection every 0.5s after 2s mark
-                    if (duration > 2.0 && this.ticks.length > 5) {
-                        this.attemptBPHDetection();
-                    }
-                    // Force fail if too long?
-                    if (duration > 10.0 && this.state === 'DETECTING') {
-                        // Keep trying but warn? or default?
+                // Try lock BPH while in DETECTING
+                if (this.state === "DETECTING") {
+                    if (elapsedSec > 2 && this.ticks.length > 10) {
+                        this._attemptBPHDetection();
                     }
                 }
 
-                const remaining = 30 - duration;
-
-                // Calculate Live Stats if Measuring
-                let stats = null;
-                if (this.state === 'MEASURING') {
-                    stats = this.calculateLiveStats();
+                // Live stats during MEASURING
+                let liveStats = null;
+                if (this.state === "MEASURING") {
+                    liveStats = this._calculateStats();
                 }
 
-                // Throttle UI updates
-                if (Math.random() < 0.1) {
-                    onProgress(Math.ceil(remaining), this.ticks.length, this.currentLevel || 0, this.state, stats);
+                // Throttle UI updates to reduce overhead
+                if (this.onProgress && Math.random() < 0.15) {
+                    this.onProgress(
+                        Math.ceil(remainingSec),
+                        this.ticks.length,
+                        this.currentLevel,
+                        this.state,
+                        liveStats
+                    );
                 }
 
-                if (duration >= 30) {
+                // Stop after window expires
+                if (elapsedSec >= this.measureDurationSec) {
                     this.stop();
-                    const results = this.calculateResults();
-                    onResult(results);
+                    const result = this._finalResults();
+                    if (this.onResult) this.onResult(result);
                 }
             };
-
         } catch (err) {
-            onError(err);
+            if (this.onError) this.onError(err);
         }
     }
 
-    processAudioBuffer(data) {
+    stop() {
+        this.isListening = false;
+        this.state = "FINISHED";
+
+        if (this.processor) {
+            this.processor.disconnect();
+            this.processor.onaudioprocess = null;
+            this.processor = null;
+        }
+        if (this.gainNode) {
+            this.gainNode.disconnect();
+            this.gainNode = null;
+        }
+        if (this.filter) {
+            this.filter.disconnect();
+            this.filter = null;
+        }
+        if (this.source) {
+            this.source.disconnect();
+            this.source = null;
+        }
+        if (this.stream) {
+            this.stream.getTracks().forEach(t => t.stop());
+            this.stream = null;
+        }
+        if (this.audioCtx) {
+            this.audioCtx.close();
+            this.audioCtx = null;
+        }
+    }
+
+    // ---------- Low-level audio processing ----------
+
+    _processAudioBuffer(buffer) {
         let maxAmp = 0;
         let maxIndex = 0;
 
-        for (let i = 0; i < data.length; i++) {
-            const abs = Math.abs(data[i]);
+        // Find peak amplitude in this buffer
+        for (let i = 0; i < buffer.length; i++) {
+            const v = buffer[i];
+            const abs = v >= 0 ? v : -v;
             if (abs > maxAmp) {
                 maxAmp = abs;
                 maxIndex = i;
             }
         }
+
         this.currentLevel = maxAmp;
 
-        // Adaptive Threshold Logic
-        // Update running peak with decay
+        // Adaptive threshold: track running peak with decay, set threshold to 50% of that
         if (maxAmp > this.runningPeak) {
             this.runningPeak = maxAmp;
         } else {
-            this.runningPeak *= 0.995; // Slow decay
+            this.runningPeak *= 0.995; // slow decay
         }
 
-        // Set threshold to 50% of recent peak, but never below absolute min
-        this.adaptiveThreshold = Math.max(0.00075, this.runningPeak * 0.5);
+        this.adaptiveThreshold = Math.max(this.absMinThreshold, this.runningPeak * 0.5);
 
+        // Accept a tick when the buffer peak exceeds threshold and is far enough from the last tick
         if (maxAmp > this.adaptiveThreshold) {
-            const exactSampleIndex = this.totalSamples + maxIndex;
-            const tickTime = exactSampleIndex / this.sampleRate;
+            const absoluteSampleIndex = this.totalSamples + maxIndex;
+            const tickTime = absoluteSampleIndex / this.sampleRate;
 
             if (tickTime - this.lastTickTime > this.minInterval) {
                 this.ticks.push(tickTime);
@@ -158,150 +214,157 @@ export class WatchMicrophone {
         }
     }
 
-    attemptBPHDetection() {
-        if (this.ticks.length < 5) return;
+    // ---------- Beat rate detection (BPH) ----------
 
-        // Consensus/Voting Algorithm to robustness against Jitter (Bimodal noise) and Missed Beats
-        const standards = [14400, 18000, 19800, 21600, 25200, 28800, 36000];
+    _attemptBPHDetection() {
+        if (this.ticks.length < 8) return;
+
+        // Common mechanical watch beat rates (BPH)
+        const candidatesBPH = [14400, 18000, 19800, 21600, 25200, 28800, 36000];
+
+        const baseTime = this.ticks[0];
         const candidates = [];
 
-        const t0 = this.ticks[0];
+        for (const bph of candidatesBPH) {
+            const interval = 3600 / bph; // seconds per beat
 
-        for (const stdBPH of standards) {
-            const stdInterval = 3600 / stdBPH;
-            let totalSquaredError = 0;
-            let maxError = 0;
+            let sumSqErr = 0;
+            let maxErr = 0;
 
             for (let i = 1; i < this.ticks.length; i++) {
-                const t = this.ticks[i] - t0;
+                const t = this.ticks[i] - baseTime;
+                const n = Math.round(t / interval);
+                const expected = n * interval;
+                const diff = Math.abs(t - expected);
 
-                // Find nearest expected grid point
-                const cycles = Math.round(t / stdInterval);
-                const expectedTime = cycles * stdInterval;
-                const diff = Math.abs(t - expectedTime);
-
-                totalSquaredError += diff * diff;
-                if (diff > maxError) maxError = diff;
+                sumSqErr += diff * diff;
+                if (diff > maxErr) maxErr = diff;
             }
 
-            const rmse = Math.sqrt(totalSquaredError / (this.ticks.length - 1));
-
-            // Penalize high maxError? 
-            // If we have distinct "clusters", RMSE handles it.
-
-            candidates.push({ bph: stdBPH, rmse: rmse, maxError: maxError });
+            const rmse = Math.sqrt(sumSqErr / (this.ticks.length - 1));
+            candidates.push({ bph, interval, rmse, maxErr });
         }
 
-        // Sort by RMSE (Ascending)
         candidates.sort((a, b) => a.rmse - b.rmse);
-
         const best = candidates[0];
 
-        // Debug
-        // console.log("BPH Candidates:", candidates.slice(0, 3));
-
-        // Validation Threshold
-        // RMSE should be reasonably small. 
-        // For 28800 (0.125), random noise might give 0.04.
-        // Good lock should be < 0.02 or 0.03.
-        if (best.rmse < 0.04) {
-            console.log(`Locked BPH: ${best.bph} (RMSE: ${(best.rmse * 1000).toFixed(2)}ms)`);
-
-            this.detectedBPH = best.bph;
-            this.refInterval = 3600 / best.bph;
-            this.state = 'MEASURING';
-            this.measureStartIndex = this.ticks.length; // only use ticks from here on
-
-            // Tighten minInterval? 
-            // We know the signal is jittery, so maybe don't tighten too much?
-            // But we need to reject echoes.
-            this.minInterval = this.refInterval * 0.85;
+        // RMSE tolerance: we expect good lock at a few ms deviation
+        if (!best) return;
+        if (best.rmse > 0.04) {
+            // too noisy / not enough consistent ticks yet
+            return;
         }
+
+        // Lock reference beat rate
+        this.detectedBPH = best.bph;
+        this.refInterval = best.interval;
+        this.state = "MEASURING";
+
+        // Only use ticks after this point for stats
+        this.measureStartIndex = this.ticks.length;
+
+        // Reject echoes slightly shorter than expected beat
+        this.minInterval = this.refInterval * 0.8;
     }
 
-    calculateLiveStats() {
-        if (!this.detectedBPH || this.ticks.length < 2) return null;
+    // ---------- Rate and beat error computation ----------
 
-        // Only use ticks captured after BPH lock to avoid pre-lock noise
-        const lockedTicks = this.ticks.slice(this.measureStartIndex);
-        if (lockedTicks.length < 2) return null;
+    /**
+     * Returns:
+     * {
+     *   bph: number,
+     *   rate: number (seconds/day, + fast, - slow),
+     *   beatErrorMs: number (ms, tick–tock asymmetry),
+     *   sampleCount: number,
+     *   elapsedSec: number
+     * }
+     */
+    _calculateStats() {
+        if (!this.detectedBPH) return null;
 
-        const first = lockedTicks[0];
-        const last = lockedTicks[lockedTicks.length - 1];
-        const count = lockedTicks.length - 1; // number of intervals
+        const ticks = this.ticks.slice(this.measureStartIndex);
+        if (ticks.length < 4) return null;
 
-        // Expected time for 'count' beats at the reference interval
-        const expectedTime = count * this.refInterval;
-        const actualTime = last - first;
+        const first = ticks[0];
+        const last = ticks[ticks.length - 1];
+        const elapsed = last - first;
+        if (elapsed <= 0) return null;
 
-        // Positive drift means Actual < Expected (Device is FAST)
-        // Negative drift means Actual > Expected (Device is SLOW)
-        const drift = expectedTime - actualTime;
+        const intervals = [];
+        for (let i = 1; i < ticks.length; i++) {
+            intervals.push(ticks[i] - ticks[i - 1]);
+        }
 
-        // Rate s/day: how many seconds fast/slow the watch runs per day
-        const rate = (drift / actualTime) * 86400;
+        const nominal = this.refInterval;
 
-        // Beat Error: difference between alternating half-swing intervals (ms)
-        // i=1 gives interval between lockedTicks[0]->lockedTicks[1], etc.
-        let beatError = 0;
-        if (lockedTicks.length > 4) {
-            let evenSum = 0, evenCount = 0;
-            let oddSum = 0, oddCount = 0;
-            for (let i = 1; i < lockedTicks.length; i++) {
-                const val = lockedTicks[i] - lockedTicks[i - 1];
-                // Filter out intervals that are wildly off (doubled/missed beats)
-                if (Math.abs(val - this.refInterval) < this.refInterval * 0.3) {
-                    if (i % 2 === 1) { evenSum += val; evenCount++; } // 1st half-swing
-                    else { oddSum += val; oddCount++; }               // 2nd half-swing
-                }
+        // Filter out obviously wrong intervals (missed beats, double ticks)
+        const filtered = intervals.filter(dt => Math.abs(dt - nominal) < nominal * 0.4);
+        if (filtered.length < 3) return null;
+
+        // Observed average interval (s per beat)
+        const sum = filtered.reduce((a, b) => a + b, 0);
+        const avgInterval = sum / filtered.length;
+
+        // Rate in seconds/day: difference vs nominal beat period
+        // If avgInterval < nominal, watch is fast, so positive rate (gains seconds/day).
+        const rateSecPerDay = ((nominal - avgInterval) / nominal) * 86400;
+
+        // Beat error: tick–tock asymmetry in ms
+        // Alternate intervals (even vs odd) correspond to tick–tock sides of the balance.
+        let evenSum = 0, evenCount = 0;
+        let oddSum = 0, oddCount = 0;
+
+        for (let i = 0; i < filtered.length; i++) {
+            const dt = filtered[i];
+            if (i % 2 === 0) {
+                evenSum += dt; evenCount++;
+            } else {
+                oddSum += dt; oddCount++;
             }
-            if (evenCount > 0 && oddCount > 0) {
-                const avgEven = evenSum / evenCount;
-                const avgOdd = oddSum / oddCount;
-                // Beat error is the difference between the two half-swing averages
-                beatError = Math.abs(avgEven - avgOdd) * 1000;
-            }
+        }
+
+        let beatErrorMs = 0;
+        if (evenCount > 0 && oddCount > 0) {
+            const avgEven = evenSum / evenCount;
+            const avgOdd = oddSum / oddCount;
+            beatErrorMs = Math.abs(avgEven - avgOdd) * 1000;
         }
 
         return {
             bph: this.detectedBPH,
-            rate: rate.toFixed(1),
-            beatError: beatError.toFixed(1)
+            rate: rateSecPerDay,
+            beatErrorMs,
+            sampleCount: ticks.length,
+            elapsedSec: elapsed
         };
     }
 
-    stop() {
-        this.isListening = false;
-        if (this.processor) {
-            this.processor.disconnect();
-            this.processor.onaudioprocess = null;
+    // ---------- Final result ----------
+
+    _finalResults() {
+        if (this.ticks.length < 10) {
+            return { error: "Not enough ticks detected. Increase volume or move closer." };
         }
-        if (this.gainNode) this.gainNode.disconnect();
-        if (this.filter) this.filter.disconnect();
-        if (this.source) this.source.disconnect();
-        if (this.stream) this.stream.getTracks().forEach(track => track.stop());
-        if (this.audioCtx) this.audioCtx.close();
-    }
 
-    calculateResults() {
-        if (this.ticks.length < 10) return { error: "Not enough clicks detected. Volume too low?" };
-
-        // Final Calculation
-        if (this.state !== 'MEASURING') {
-            // Try one last detection
-            this.attemptBPHDetection();
-            if (this.state !== 'MEASURING') {
-                return { error: "Could not lock BPH. Signal too noisy?" };
+        if (!this.detectedBPH) {
+            // One last attempt if we never locked during streaming
+            this._attemptBPHDetection();
+            if (!this.detectedBPH) {
+                return { error: "Could not lock beat rate (BPH). Signal too noisy or inconsistent." };
             }
         }
 
-        const stats = this.calculateLiveStats();
+        const stats = this._calculateStats();
+        if (!stats) {
+            return { error: "Not enough clean beats for stable measurement." };
+        }
 
         return {
-            rate: stats.rate,
-            beatError: stats.beatError,
-            bph: this.detectedBPH,
-            bphActual: Math.round(this.detectedBPH)
+            bph: stats.bph,
+            rateSecondsPerDay: Number(stats.rate.toFixed(1)),      // + fast, - slow
+            beatErrorMs: Number(stats.beatErrorMs.toFixed(1)),
+            rawSampleCount: stats.sampleCount,
+            measuredSpanSec: Number(stats.elapsedSec.toFixed(2))
         };
     }
 }
