@@ -17,6 +17,7 @@ export class WatchMicrophone {
         this.state = 'IDLE'; // IDLE, DETECTING, MEASURING, FINISHED
         this.detectedBPH = 0;
         this.refInterval = 0; // Target interval for locked BPH
+        this.measureStartIndex = 0; // ticks[] index when MEASURING begins
         this.startTime = 0;
         this.totalSamples = 0;
         this.sampleRate = 0;
@@ -69,6 +70,7 @@ export class WatchMicrophone {
             // Initialize State
             this.state = 'DETECTING';
             this.detectedBPH = 0;
+            this.measureStartIndex = 0;
             this.minInterval = 0.08; // Conservative start
             this.runningPeak = 0.001;
 
@@ -208,6 +210,7 @@ export class WatchMicrophone {
             this.detectedBPH = best.bph;
             this.refInterval = 3600 / best.bph;
             this.state = 'MEASURING';
+            this.measureStartIndex = this.ticks.length; // only use ticks from here on
 
             // Tighten minInterval? 
             // We know the signal is jittery, so maybe don't tighten too much?
@@ -219,11 +222,15 @@ export class WatchMicrophone {
     calculateLiveStats() {
         if (!this.detectedBPH || this.ticks.length < 2) return null;
 
-        const first = this.ticks[0];
-        const last = this.ticks[this.ticks.length - 1];
-        const count = this.ticks.length - 1;
+        // Only use ticks captured after BPH lock to avoid pre-lock noise
+        const lockedTicks = this.ticks.slice(this.measureStartIndex);
+        if (lockedTicks.length < 2) return null;
 
-        // Expected time for 'count' beats
+        const first = lockedTicks[0];
+        const last = lockedTicks[lockedTicks.length - 1];
+        const count = lockedTicks.length - 1; // number of intervals
+
+        // Expected time for 'count' beats at the reference interval
         const expectedTime = count * this.refInterval;
         const actualTime = last - first;
 
@@ -231,25 +238,27 @@ export class WatchMicrophone {
         // Negative drift means Actual > Expected (Device is SLOW)
         const drift = expectedTime - actualTime;
 
-        // Rate s/d
+        // Rate s/day: how many seconds fast/slow the watch runs per day
         const rate = (drift / actualTime) * 86400;
 
-        // Beat Error
+        // Beat Error: difference between alternating half-swing intervals (ms)
+        // i=1 gives interval between lockedTicks[0]->lockedTicks[1], etc.
         let beatError = 0;
-        if (this.ticks.length > 4) {
+        if (lockedTicks.length > 4) {
             let evenSum = 0, evenCount = 0;
             let oddSum = 0, oddCount = 0;
-            for (let i = 1; i < this.ticks.length; i++) {
-                const val = this.ticks[i] - this.ticks[i - 1];
-                // Basic filter for validity
+            for (let i = 1; i < lockedTicks.length; i++) {
+                const val = lockedTicks[i] - lockedTicks[i - 1];
+                // Filter out intervals that are wildly off (doubled/missed beats)
                 if (Math.abs(val - this.refInterval) < this.refInterval * 0.3) {
-                    if (i % 2 === 0) { evenSum += val; evenCount++; }
-                    else { oddSum += val; oddCount++; }
+                    if (i % 2 === 1) { evenSum += val; evenCount++; } // 1st half-swing
+                    else { oddSum += val; oddCount++; }               // 2nd half-swing
                 }
             }
             if (evenCount > 0 && oddCount > 0) {
                 const avgEven = evenSum / evenCount;
                 const avgOdd = oddSum / oddCount;
+                // Beat error is the difference between the two half-swing averages
                 beatError = Math.abs(avgEven - avgOdd) * 1000;
             }
         }
