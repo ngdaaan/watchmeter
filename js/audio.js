@@ -95,7 +95,7 @@ export class WatchMicrophone {
             this.detectedBPH = 0;
             this.refInterval = 0;
             this.measureStartIndex = 0;
-            this.startTimeMs = performance.now();
+            this.startTimeMs = Date.now();
 
             this.processor.onaudioprocess = (e) => {
                 if (!this.isListening) return;
@@ -105,7 +105,7 @@ export class WatchMicrophone {
 
                 this.totalSamples += inputData.length;
 
-                const elapsedSec = (performance.now() - this.startTimeMs) / 1000;
+                const elapsedSec = (Date.now() - this.startTimeMs) / 1000;
                 const remainingSec = Math.max(0, this.measureDurationSec - elapsedSec);
 
                 // Try lock BPH while in DETECTING
@@ -149,8 +149,8 @@ export class WatchMicrophone {
         this.state = "FINISHED";
 
         if (this.processor) {
-            this.processor.disconnect();
             this.processor.onaudioprocess = null;
+            this.processor.disconnect();
             this.processor = null;
         }
         if (this.gainNode) {
@@ -169,8 +169,8 @@ export class WatchMicrophone {
             this.stream.getTracks().forEach(t => t.stop());
             this.stream = null;
         }
-        if (this.audioCtx) {
-            this.audioCtx.close();
+        if (this.audioCtx && this.audioCtx.state !== 'closed') {
+            this.audioCtx.close().catch(() => { });
             this.audioCtx = null;
         }
     }
